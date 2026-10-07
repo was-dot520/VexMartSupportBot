@@ -18,18 +18,23 @@ from aiogram.fsm.storage.memory import MemoryStorage
 
 
 # =========================================================
-# НАСТРОЙКИ
+# VEXMART SUPPORT 0.1.1
 # =========================================================
 
-BOT_TOKEN = os.getenv("BOT_TOKEN")
-ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
+BOT_VERSION = "0.1.1"
 
-# Render автоматически предоставляет PORT
+BOT_TOKEN = os.getenv("BOT_TOKEN")
+
+# Несколько администраторов через запятую:
+# ADMIN_IDS=123456789,987654321,555555555
+ADMIN_IDS = {
+    int(admin_id.strip())
+    for admin_id in os.getenv("ADMIN_IDS", "").split(",")
+    if admin_id.strip()
+}
+
 PORT = int(os.getenv("PORT", "10000"))
 
-# Render URL твоего сервиса.
-# Пример:
-# https://vexmartsupportbot.onrender.com
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
 
 VEXMART_CHANNEL = "https://t.me/VexMart"
@@ -39,20 +44,27 @@ DATABASE = "support.db"
 WEBHOOK_PATH = "/webhook"
 
 
+# =========================================================
+# ПРОВЕРКА НАСТРОЕК
+# =========================================================
+
 if not BOT_TOKEN:
     raise RuntimeError("Не задан BOT_TOKEN")
 
-if ADMIN_ID == 0:
-    raise RuntimeError("Не задан ADMIN_ID")
+if not ADMIN_IDS:
+    raise RuntimeError("Не задан ADMIN_IDS")
 
 if not RENDER_EXTERNAL_URL:
     raise RuntimeError(
         "Не задан RENDER_EXTERNAL_URL. "
-        "Render должен автоматически передать эту переменную."
+        "Render должен предоставить его автоматически."
     )
 
 
-WEBHOOK_URL = RENDER_EXTERNAL_URL.rstrip("/") + WEBHOOK_PATH
+WEBHOOK_URL = (
+    RENDER_EXTERNAL_URL.rstrip("/")
+    + WEBHOOK_PATH
+)
 
 
 # =========================================================
@@ -77,16 +89,25 @@ def init_database():
     conn.close()
 
 
-def create_ticket(user_id: int, username: str, text: str):
+def create_ticket(
+    user_id: int,
+    username: str,
+    text: str
+):
     conn = sqlite3.connect(DATABASE)
     cursor = conn.cursor()
 
     cursor.execute(
         """
-        INSERT INTO tickets (user_id, username, text, status)
+        INSERT INTO tickets
+        (user_id, username, text, status)
         VALUES (?, ?, ?, 'open')
         """,
-        (user_id, username, text)
+        (
+            user_id,
+            username,
+            text
+        )
     )
 
     ticket_id = cursor.lastrowid
@@ -222,7 +243,9 @@ def admin_menu():
 # BOT / DISPATCHER
 # =========================================================
 
-bot = Bot(token=BOT_TOKEN)
+bot = Bot(
+    token=BOT_TOKEN
+)
 
 dp = Dispatcher(
     storage=MemoryStorage()
@@ -240,15 +263,16 @@ async def start_handler(
 ):
     await state.clear()
 
-    if message.from_user.id == ADMIN_ID:
+    if message.from_user.id in ADMIN_IDS:
         await message.answer(
-            "🛠️ VexMart Support\n\n"
+            f"🛠️ VexMart Support {BOT_VERSION}\n\n"
             "Панель администратора:",
             reply_markup=admin_menu()
         )
     else:
         await message.answer(
-            "👋 Добро пожаловать в техническую поддержку VexMart!\n\n"
+            "👋 Добро пожаловать в техническую "
+            "поддержку VexMart!\n\n"
             "Выберите нужное действие:",
             reply_markup=user_menu()
         )
@@ -306,24 +330,31 @@ async def create_ticket_message(
         reply_markup=user_menu()
     )
 
-    # Уведомляем администратора
-    await bot.send_message(
-        ADMIN_ID,
-        f"🔴 Новое обращение #{ticket_id}\n\n"
-        f"👤 Пользователь: @{username}\n"
-        f"🆔 ID: {message.from_user.id}\n\n"
-        f"📝 {message.text}",
-        reply_markup=InlineKeyboardMarkup(
-            inline_keyboard=[
-                [
-                    InlineKeyboardButton(
-                        text="📩 Открыть обращения",
-                        callback_data="admin_tickets"
-                    )
-                ]
-            ]
-        )
-    )
+    # Уведомляем всех администраторов
+    for admin_id in ADMIN_IDS:
+        try:
+            await bot.send_message(
+                admin_id,
+                f"🔴 Новое обращение #{ticket_id}\n\n"
+                f"👤 Пользователь: @{username}\n"
+                f"🆔 ID: {message.from_user.id}\n\n"
+                f"📝 {message.text}",
+                reply_markup=InlineKeyboardMarkup(
+                    inline_keyboard=[
+                        [
+                            InlineKeyboardButton(
+                                text="📩 Открыть обращения",
+                                callback_data="admin_tickets"
+                            )
+                        ]
+                    ]
+                )
+            )
+        except Exception as error:
+            print(
+                f"Не удалось уведомить администратора "
+                f"{admin_id}: {error}"
+            )
 
 
 # =========================================================
@@ -331,7 +362,9 @@ async def create_ticket_message(
 # =========================================================
 
 @dp.callback_query(F.data == "my_tickets")
-async def my_tickets(callback: CallbackQuery):
+async def my_tickets(
+    callback: CallbackQuery
+):
     tickets = get_user_tickets(
         callback.from_user.id
     )
@@ -380,7 +413,7 @@ async def my_tickets(callback: CallbackQuery):
 async def admin_tickets(
     callback: CallbackQuery
 ):
-    if callback.from_user.id != ADMIN_ID:
+    if callback.from_user.id not in ADMIN_IDS:
         await callback.answer(
             "⛔ У вас нет доступа.",
             show_alert=True
@@ -439,7 +472,7 @@ async def admin_tickets(
 async def open_ticket(
     callback: CallbackQuery
 ):
-    if callback.from_user.id != ADMIN_ID:
+    if callback.from_user.id not in ADMIN_IDS:
         await callback.answer(
             "⛔ У вас нет доступа.",
             show_alert=True
@@ -514,7 +547,7 @@ async def reply_start(
     callback: CallbackQuery,
     state: FSMContext
 ):
-    if callback.from_user.id != ADMIN_ID:
+    if callback.from_user.id not in ADMIN_IDS:
         await callback.answer(
             "⛔ У вас нет доступа.",
             show_alert=True
@@ -554,7 +587,7 @@ async def send_reply(
     message: Message,
     state: FSMContext
 ):
-    if message.from_user.id != ADMIN_ID:
+    if message.from_user.id not in ADMIN_IDS:
         return
 
     if not message.text:
@@ -598,7 +631,11 @@ async def send_reply(
             reply_markup=admin_menu()
         )
 
-    except Exception:
+    except Exception as error:
+        print(
+            f"Ошибка отправки ответа: {error}"
+        )
+
         await message.answer(
             "❌ Не удалось отправить ответ.\n\n"
             "Возможно, пользователь заблокировал бота."
@@ -608,14 +645,14 @@ async def send_reply(
 
 
 # =========================================================
-# АДМИН — ЗАКРЫТЬ
+# АДМИН — ЗАКРЫТЬ ОБРАЩЕНИЕ
 # =========================================================
 
 @dp.callback_query(F.data.startswith("close_"))
 async def close_ticket_handler(
     callback: CallbackQuery
 ):
-    if callback.from_user.id != ADMIN_ID:
+    if callback.from_user.id not in ADMIN_IDS:
         await callback.answer(
             "⛔ У вас нет доступа.",
             show_alert=True
@@ -647,8 +684,10 @@ async def close_ticket_handler(
             "создайте новое обращение.",
             reply_markup=user_menu()
         )
-    except Exception:
-        pass
+    except Exception as error:
+        print(
+            f"Не удалось уведомить пользователя: {error}"
+        )
 
     await callback.message.answer(
         f"✅ Обращение #{ticket_id} закрыто.",
@@ -659,7 +698,7 @@ async def close_ticket_handler(
 
 
 # =========================================================
-# FASTAPI
+# FASTAPI / RENDER
 # =========================================================
 
 @asynccontextmanager
@@ -672,7 +711,11 @@ async def lifespan(app: FastAPI):
     )
 
     print(
-        f"VexMart Support 0.1 запущен!"
+        f"VexMart Support {BOT_VERSION} запущен!"
+    )
+
+    print(
+        f"Администраторы: {sorted(ADMIN_IDS)}"
     )
 
     print(
@@ -688,6 +731,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="VexMart Support",
+    version=BOT_VERSION,
     lifespan=lifespan
 )
 
@@ -701,7 +745,7 @@ async def root():
     return {
         "status": "ok",
         "service": "VexMart Support",
-        "version": "0.1"
+        "version": BOT_VERSION
     }
 
 
@@ -750,7 +794,7 @@ async def telegram_webhook(
 
 
 # =========================================================
-# ЗАПУСК ДЛЯ RENDER
+# ЗАПУСК
 # =========================================================
 
 if __name__ == "__main__":
@@ -761,4 +805,4 @@ if __name__ == "__main__":
         "bot:app",
         host="0.0.0.0",
         port=PORT
-)
+    )
