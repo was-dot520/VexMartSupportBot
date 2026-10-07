@@ -1,51 +1,63 @@
 import os
 import sqlite3
-import asyncio
+from contextlib import asynccontextmanager
 
+from fastapi import FastAPI, Request, HTTPException
 from aiogram import Bot, Dispatcher, F
-from aiogram.filters import CommandStart
 from aiogram.types import (
     Message,
     CallbackQuery,
     InlineKeyboardMarkup,
     InlineKeyboardButton,
+    Update,
 )
+from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
 
 
-# =========================
+# =========================================================
 # НАСТРОЙКИ
-# =========================
+# =========================================================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
-
-# ВАЖНО:
-# Здесь укажи свой Telegram ID администратора.
-# Например: ADMIN_ID = 123456789
 ADMIN_ID = int(os.getenv("ADMIN_ID", "0"))
 
-# Ссылка на Telegram-канал VexMart
+# Render автоматически предоставляет PORT
+PORT = int(os.getenv("PORT", "10000"))
+
+# Render URL твоего сервиса.
+# Пример:
+# https://vexmartsupportbot.onrender.com
+RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL")
+
 VEXMART_CHANNEL = "https://t.me/VexMart"
 
 DATABASE = "support.db"
 
+WEBHOOK_PATH = "/webhook"
 
-# =========================
-# ПРОВЕРКА НАСТРОЕК
-# =========================
 
 if not BOT_TOKEN:
-    raise RuntimeError("Не задана переменная BOT_TOKEN")
+    raise RuntimeError("Не задан BOT_TOKEN")
 
 if ADMIN_ID == 0:
-    raise RuntimeError("Не задана переменная ADMIN_ID")
+    raise RuntimeError("Не задан ADMIN_ID")
+
+if not RENDER_EXTERNAL_URL:
+    raise RuntimeError(
+        "Не задан RENDER_EXTERNAL_URL. "
+        "Render должен автоматически передать эту переменную."
+    )
 
 
-# =========================
+WEBHOOK_URL = RENDER_EXTERNAL_URL.rstrip("/") + WEBHOOK_PATH
+
+
+# =========================================================
 # БАЗА ДАННЫХ
-# =========================
+# =========================================================
 
 def init_database():
     conn = sqlite3.connect(DATABASE)
@@ -134,9 +146,27 @@ def close_ticket(ticket_id: int):
     conn.close()
 
 
-# =========================
+def get_user_tickets(user_id: int):
+    conn = sqlite3.connect(DATABASE)
+    cursor = conn.cursor()
+
+    cursor.execute("""
+        SELECT id, text, status
+        FROM tickets
+        WHERE user_id = ?
+        ORDER BY id DESC
+    """, (user_id,))
+
+    tickets = cursor.fetchall()
+
+    conn.close()
+
+    return tickets
+
+
+# =========================================================
 # СОСТОЯНИЯ
-# =========================
+# =========================================================
 
 class UserStates(StatesGroup):
     waiting_for_ticket = State()
@@ -146,9 +176,9 @@ class AdminStates(StatesGroup):
     waiting_for_reply = State()
 
 
-# =========================
+# =========================================================
 # КЛАВИАТУРЫ
-# =========================
+# =========================================================
 
 def user_menu():
     return InlineKeyboardMarkup(
@@ -188,20 +218,26 @@ def admin_menu():
     )
 
 
-# =========================
+# =========================================================
 # BOT / DISPATCHER
-# =========================
+# =========================================================
 
 bot = Bot(token=BOT_TOKEN)
-dp = Dispatcher(storage=MemoryStorage())
+
+dp = Dispatcher(
+    storage=MemoryStorage()
+)
 
 
-# =========================
-# /start
-# =========================
+# =========================================================
+# /START
+# =========================================================
 
 @dp.message(CommandStart())
-async def start_handler(message: Message, state: FSMContext):
+async def start_handler(
+    message: Message,
+    state: FSMContext
+):
     await state.clear()
 
     if message.from_user.id == ADMIN_ID:
@@ -218,20 +254,22 @@ async def start_handler(message: Message, state: FSMContext):
         )
 
 
-# =========================
+# =========================================================
 # СОЗДАНИЕ ОБРАЩЕНИЯ
-# =========================
+# =========================================================
 
 @dp.callback_query(F.data == "create_ticket")
 async def create_ticket_start(
     callback: CallbackQuery,
     state: FSMContext
 ):
-    await state.set_state(UserStates.waiting_for_ticket)
+    await state.set_state(
+        UserStates.waiting_for_ticket
+    )
 
     await callback.message.answer(
         "📝 Опишите вашу проблему или вопрос.\n\n"
-        "После отправки сообщение будет передано в техническую поддержку."
+        "Отправьте сообщение следующим сообщением."
     )
 
     await callback.answer()
@@ -242,20 +280,22 @@ async def create_ticket_message(
     message: Message,
     state: FSMContext
 ):
-    text = message.text
-
-    if not text:
+    if not message.text:
         await message.answer(
-            "❌ Пожалуйста, отправьте обращение обычным текстовым сообщением."
+            "❌ Пока что обращения можно отправлять "
+            "только текстом."
         )
         return
 
-    username = message.from_user.username or "без username"
+    username = (
+        message.from_user.username
+        or "без username"
+    )
 
     ticket_id = create_ticket(
         user_id=message.from_user.id,
         username=username,
-        text=text
+        text=message.text
     )
 
     await state.clear()
@@ -266,13 +306,13 @@ async def create_ticket_message(
         reply_markup=user_menu()
     )
 
-    # Уведомление администратора
+    # Уведомляем администратора
     await bot.send_message(
         ADMIN_ID,
         f"🔴 Новое обращение #{ticket_id}\n\n"
         f"👤 Пользователь: @{username}\n"
         f"🆔 ID: {message.from_user.id}\n\n"
-        f"📝 {text}",
+        f"📝 {message.text}",
         reply_markup=InlineKeyboardMarkup(
             inline_keyboard=[
                 [
@@ -286,37 +326,29 @@ async def create_ticket_message(
     )
 
 
-# =========================
+# =========================================================
 # МОИ ОБРАЩЕНИЯ
-# =========================
+# =========================================================
 
 @dp.callback_query(F.data == "my_tickets")
 async def my_tickets(callback: CallbackQuery):
-    conn = sqlite3.connect(DATABASE)
-    cursor = conn.cursor()
-
-    cursor.execute("""
-        SELECT id, text, status
-        FROM tickets
-        WHERE user_id = ?
-        ORDER BY id DESC
-    """, (callback.from_user.id,))
-
-    tickets = cursor.fetchall()
-
-    conn.close()
+    tickets = get_user_tickets(
+        callback.from_user.id
+    )
 
     if not tickets:
         await callback.message.answer(
             "📋 У вас пока нет обращений.",
             reply_markup=user_menu()
         )
+
         await callback.answer()
         return
 
     text = "📋 Ваши обращения:\n\n"
 
     for ticket_id, ticket_text, status in tickets:
+
         if status == "open":
             status_text = "🔴 Открыто"
         else:
@@ -340,12 +372,14 @@ async def my_tickets(callback: CallbackQuery):
     await callback.answer()
 
 
-# =========================
-# АДМИН: СПИСОК ОБРАЩЕНИЙ
-# =========================
+# =========================================================
+# АДМИН — СПИСОК ОБРАЩЕНИЙ
+# =========================================================
 
 @dp.callback_query(F.data == "admin_tickets")
-async def admin_tickets(callback: CallbackQuery):
+async def admin_tickets(
+    callback: CallbackQuery
+):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer(
             "⛔ У вас нет доступа.",
@@ -360,12 +394,14 @@ async def admin_tickets(callback: CallbackQuery):
             "📩 Открытых обращений нет.",
             reply_markup=admin_menu()
         )
+
         await callback.answer()
         return
 
     buttons = []
 
     for ticket_id, user_id, username, text in tickets:
+
         short_text = text[:35]
 
         if len(text) > 35:
@@ -385,24 +421,24 @@ async def admin_tickets(callback: CallbackQuery):
         )
     ])
 
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=buttons
-    )
-
     await callback.message.answer(
         "📩 Открытые обращения:",
-        reply_markup=keyboard
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=buttons
+        )
     )
 
     await callback.answer()
 
 
-# =========================
-# АДМИН: ОТКРЫТЬ ОБРАЩЕНИЕ
-# =========================
+# =========================================================
+# АДМИН — ОТКРЫТЬ ОБРАЩЕНИЕ
+# =========================================================
 
 @dp.callback_query(F.data.startswith("ticket_"))
-async def open_ticket(callback: CallbackQuery, state: FSMContext):
+async def open_ticket(
+    callback: CallbackQuery
+):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer(
             "⛔ У вас нет доступа.",
@@ -410,7 +446,9 @@ async def open_ticket(callback: CallbackQuery, state: FSMContext):
         )
         return
 
-    ticket_id = int(callback.data.split("_")[1])
+    ticket_id = int(
+        callback.data.split("_")[1]
+    )
 
     ticket = get_ticket(ticket_id)
 
@@ -423,33 +461,35 @@ async def open_ticket(callback: CallbackQuery, state: FSMContext):
 
     _, user_id, username, text, status = ticket
 
-    if status == "open":
-        status_text = "🔴 Открыто"
-    else:
-        status_text = "✅ Закрыто"
-
-    keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="💬 Ответить",
-                    callback_data=f"reply_{ticket_id}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="✅ Закрыть",
-                    callback_data=f"close_{ticket_id}"
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="⬅️ Назад",
-                    callback_data="admin_tickets"
-                )
-            ]
-        ]
+    status_text = (
+        "🔴 Открыто"
+        if status == "open"
+        else "✅ Закрыто"
     )
+
+    buttons = []
+
+    if status == "open":
+        buttons.append([
+            InlineKeyboardButton(
+                text="💬 Ответить",
+                callback_data=f"reply_{ticket_id}"
+            )
+        ])
+
+        buttons.append([
+            InlineKeyboardButton(
+                text="✅ Закрыть",
+                callback_data=f"close_{ticket_id}"
+            )
+        ])
+
+    buttons.append([
+        InlineKeyboardButton(
+            text="⬅️ Назад",
+            callback_data="admin_tickets"
+        )
+    ])
 
     await callback.message.answer(
         f"🆘 Обращение #{ticket_id}\n\n"
@@ -457,18 +497,23 @@ async def open_ticket(callback: CallbackQuery, state: FSMContext):
         f"🆔 ID: {user_id}\n"
         f"📌 Статус: {status_text}\n\n"
         f"📝 Обращение:\n{text}",
-        reply_markup=keyboard
+        reply_markup=InlineKeyboardMarkup(
+            inline_keyboard=buttons
+        )
     )
 
     await callback.answer()
 
 
-# =========================
-# АДМИН: ОТВЕТ
-# =========================
+# =========================================================
+# АДМИН — ОТВЕТИТЬ
+# =========================================================
 
 @dp.callback_query(F.data.startswith("reply_"))
-async def reply_start(callback: CallbackQuery, state: FSMContext):
+async def reply_start(
+    callback: CallbackQuery,
+    state: FSMContext
+):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer(
             "⛔ У вас нет доступа.",
@@ -476,7 +521,9 @@ async def reply_start(callback: CallbackQuery, state: FSMContext):
         )
         return
 
-    ticket_id = int(callback.data.split("_")[1])
+    ticket_id = int(
+        callback.data.split("_")[1]
+    )
 
     ticket = get_ticket(ticket_id)
 
@@ -487,8 +534,13 @@ async def reply_start(callback: CallbackQuery, state: FSMContext):
         )
         return
 
-    await state.update_data(ticket_id=ticket_id)
-    await state.set_state(AdminStates.waiting_for_reply)
+    await state.update_data(
+        ticket_id=ticket_id
+    )
+
+    await state.set_state(
+        AdminStates.waiting_for_reply
+    )
 
     await callback.message.answer(
         f"✍️ Напишите ответ на обращение #{ticket_id}."
@@ -505,7 +557,15 @@ async def send_reply(
     if message.from_user.id != ADMIN_ID:
         return
 
+    if not message.text:
+        await message.answer(
+            "❌ Пока что ответ можно отправить "
+            "только текстом."
+        )
+        return
+
     data = await state.get_data()
+
     ticket_id = data.get("ticket_id")
 
     if not ticket_id:
@@ -524,12 +584,6 @@ async def send_reply(
 
     user_id = ticket[1]
 
-    if not message.text:
-        await message.answer(
-            "❌ Ответ должен быть обычным текстовым сообщением."
-        )
-        return
-
     try:
         await bot.send_message(
             user_id,
@@ -546,19 +600,21 @@ async def send_reply(
 
     except Exception:
         await message.answer(
-            "❌ Не удалось отправить сообщение пользователю.\n"
+            "❌ Не удалось отправить ответ.\n\n"
             "Возможно, пользователь заблокировал бота."
         )
 
     await state.clear()
 
 
-# =========================
-# АДМИН: ЗАКРЫТИЕ
-# =========================
+# =========================================================
+# АДМИН — ЗАКРЫТЬ
+# =========================================================
 
 @dp.callback_query(F.data.startswith("close_"))
-async def close_ticket_handler(callback: CallbackQuery):
+async def close_ticket_handler(
+    callback: CallbackQuery
+):
     if callback.from_user.id != ADMIN_ID:
         await callback.answer(
             "⛔ У вас нет доступа.",
@@ -566,7 +622,9 @@ async def close_ticket_handler(callback: CallbackQuery):
         )
         return
 
-    ticket_id = int(callback.data.split("_")[1])
+    ticket_id = int(
+        callback.data.split("_")[1]
+    )
 
     ticket = get_ticket(ticket_id)
 
@@ -585,7 +643,8 @@ async def close_ticket_handler(callback: CallbackQuery):
         await bot.send_message(
             user_id,
             f"✅ Обращение #{ticket_id} закрыто.\n\n"
-            "Если у вас появится новый вопрос, создайте новое обращение.",
+            "Если у вас появится новый вопрос, "
+            "создайте новое обращение.",
             reply_markup=user_menu()
         )
     except Exception:
@@ -599,17 +658,107 @@ async def close_ticket_handler(callback: CallbackQuery):
     await callback.answer()
 
 
-# =========================
-# ЗАПУСК
-# =========================
+# =========================================================
+# FASTAPI
+# =========================================================
 
-async def main():
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+
     init_database()
 
-    print("VexMart Support 0.1 запущен!")
+    await bot.set_webhook(
+        url=WEBHOOK_URL
+    )
 
-    await dp.start_polling(bot)
+    print(
+        f"VexMart Support 0.1 запущен!"
+    )
 
+    print(
+        f"Webhook: {WEBHOOK_URL}"
+    )
+
+    yield
+
+    await bot.delete_webhook()
+
+    await bot.session.close()
+
+
+app = FastAPI(
+    title="VexMart Support",
+    lifespan=lifespan
+)
+
+
+# =========================================================
+# HEALTH CHECK
+# =========================================================
+
+@app.get("/")
+async def root():
+    return {
+        "status": "ok",
+        "service": "VexMart Support",
+        "version": "0.1"
+    }
+
+
+@app.get("/health")
+async def health():
+    return {
+        "status": "healthy"
+    }
+
+
+# =========================================================
+# TELEGRAM WEBHOOK
+# =========================================================
+
+@app.post(WEBHOOK_PATH)
+async def telegram_webhook(
+    request: Request
+):
+    try:
+        data = await request.json()
+
+        update = Update.model_validate(
+            data,
+            context={"bot": bot}
+        )
+
+        await dp.feed_update(
+            bot,
+            update
+        )
+
+        return {
+            "ok": True
+        }
+
+    except Exception as error:
+
+        print(
+            f"Webhook error: {error}"
+        )
+
+        raise HTTPException(
+            status_code=500,
+            detail="Webhook processing error"
+        )
+
+
+# =========================================================
+# ЗАПУСК ДЛЯ RENDER
+# =========================================================
 
 if __name__ == "__main__":
-    asyncio.run(main())
+
+    import uvicorn
+
+    uvicorn.run(
+        "bot:app",
+        host="0.0.0.0",
+        port=PORT
+)
